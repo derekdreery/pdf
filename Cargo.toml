@@ -1,0 +1,16 @@
+[package]
+name = "pdf"
+version = "0.1.0"
+authors = ["Richard Dodd <richard.o.dodd@gmail.com>"]
+
+[dependencies]
+nom = { version = "*", features = ["verbose-errors"] }
+pdf-par-ser = { path = "./pdf-par-ser", version = "*" }
+error-chain = "*"
+bigdecimal = "*"
+num = "*"
+itertools = "*"
+memmap = "*"
+log = "*"
+
+[workspace]

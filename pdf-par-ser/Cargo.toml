@@ -1,0 +1,11 @@
+[package]
+name = "pdf-par-ser"
+description = "Parsers and serializers for pdf format"
+version = "0.1.0"
+authors = ["Richard Dodd <richard.o.dodd@gmail.com>"]
+
+[dependencies]
+nom = "*"
+bigdecimal = "*"
+num = "*"
+itertools = "*"
