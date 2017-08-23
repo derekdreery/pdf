@@ -1,5 +1,7 @@
 //! Utility functions used elsewhere
-use num;
+//!
+//! This is a bit of a mess of jumbled up functionality
+//use num;
 use nom;
 
 macro_rules! pdf_ws (
@@ -9,15 +11,25 @@ macro_rules! pdf_ws (
     }}
 );
 
-named!(pub eat_pdf_ws, eat_separator!(&b"\0\t\n\x0c\r "[..]));
+named!(#[doc="Matches all tokens considered whitespace in pdf, and consumes them"],
+       pub eat_pdf_ws, eat_separator!(&b"\0\t\n\x0c\r "[..]));
 
-/// Converts [u8; 3] to u8
+/// Converts [u8; 3] to u8. Used in TODO
 #[inline]
 pub fn arr3_to_oct(v: &[u8; 3]) -> u8 {
-    (v[0] - b'0').wrapping_shl(6) + (v[1] - b'0').wrapping_shl(3) + v[2] - b'0'
+    (v[0] - b'0').wrapping_shl(6) + (v[1] - b'0').wrapping_shl(3) + (v[2] - b'0')
 }
 
-/// Converts ascii hex value to u8
+/// Converts u8 to [u8; 3]. Used in TODO
+#[inline]
+pub fn oct_to_arr3(v: u8) -> [u8; 3] {
+    let v0 = ((v & 0b11000000) >> 6) + b'0';
+    let v1 = ((v & 0b00111000) >> 3) + b'0';
+    let v2 = (v & 0b00000111) + b'0';
+    [v0, v1, v2]
+}
+
+/// Converts ascii hex value to u8. Used in TODO
 #[inline]
 pub fn ascii_hex_to_u8(i: &u8) -> Option<u8> {
     match *i {
@@ -28,7 +40,22 @@ pub fn ascii_hex_to_u8(i: &u8) -> Option<u8> {
     }
 }
 
-/// Decode patterns like #23 into b'\x23'
+/// Turn non-ascii charaters into "\x00" hex format. Used in TODO
+pub fn encode_non_ascii(input: &[u8]) -> String {
+    use std::fmt::Write;
+
+    let mut output = String::with_capacity(input.len());
+    for &ch in input {
+        if ch > 31 && ch < 127 {
+            output.push(ch.into());
+        } else {
+            write!(&mut output, "\\x{:x}", ch).unwrap(); // cannot fail
+        }
+    }
+    output
+}
+
+/// Decode patterns like #23 into b'\x23'. Used in TODO
 pub fn decode_number_sign(input: &[u8]) -> Vec<u8> {
     let mut iter = input.iter().enumerate();
     let mut out = Vec::with_capacity(input.len()); // upper bound
@@ -49,13 +76,16 @@ pub fn decode_number_sign(input: &[u8]) -> Vec<u8> {
             out.push(ch);
         }
     }
-    println!("out: {:?}", String::from_utf8_lossy(&out));
+    //println!("out: {:?}", String::from_utf8_lossy(&out));
     out
 }
 
-named!(pub parse_line_ending, alt!(tag!(b"\r\n") | tag!(b"\r") | tag!(b"\n")));
+named!(#[doc=r#"Parses a line ending in a pdf file, which is one of "\r\n", "\r", or "\n". "#],
+       pub parse_line_ending, alt!(tag!(b"\r\n") | tag!(b"\r") | tag!(b"\n")));
 
-named!(pub parse_pos_num<u64>, flat_map!(call!(nom::digit), parse_to!(usize)));
+named!(#[doc="A simple parser that takes an array of digits (`[0-9]`) and parses them into a \
+       usize"],
+    pub parse_pos_num<usize>, flat_map!(call!(nom::digit), parse_to!(usize)));
 
 /// Helper function to check a byte to see if pdf considers it whitespace (see spec for which char
 /// codes are whitespace)
@@ -84,13 +114,22 @@ pub fn is_normal_char(ch: u8) -> bool {
     ! is_whitespace(ch) && ! is_delimiter(ch)
 }
 
+named!(#[doc = "parse a line ending in a pdf file"],
+       pub pdf_eol,
+       alt!(tag!(b"\r") | tag!(b"\n") | tag!(b"\r\n")));
+
+named!(#[doc = "Line endings are different for xref records to preserve alignment \
+                (\\r and \\n are preceeded by ` `)"],
+       pub xref_eol,
+       alt!(tag!(b" \r") | tag!(b" \n") | tag!(b"\r\n")));
+
 #[cfg(test)]
 /// Helper macro to test some input and output against a parser
 macro_rules! test_helper {
     ($fn:ident => [ $( ( $input:expr, $output:expr ) ),+ ] ) => {{
         $(
             assert_eq!(super::$fn(&$input[..])
-                       /**/.map_err(|_err| error_code!(ErrorKind::Custom(0)))/**/, $output);
+                       /**/.map_err(|_err| error_code!(nom::ErrorKind::Custom(0)))/**/, $output);
         )+
     }};
     ($fn:ident => [ $( ( $input:expr, $output:expr, $msg:expr ) ),+ ] ) => {{
@@ -101,7 +140,101 @@ macro_rules! test_helper {
     }}
 }
 
+#[cfg(test)]
 macro_rules! test_error {
-    () => (IResult::Error(error_code!(ErrorKind::Custom(0))))
+    () => (IResult::Error(error_code!(nom::ErrorKind::Custom(0))))
 }
 
+/*
+/// Useful to log a value as it is passed through
+pub fn debug_log<D: ::std::fmt::Debug>(d: D) -> D {
+    println!("{:?}", d);
+    d
+}
+*/
+
+/// Like try, but for option (yes I know it's naughty not to type errors, todo this before 1.0)
+macro_rules! try_opt {
+    ($e:expr) => {
+        match $e {
+            Some(inner) => inner,
+            None => { return None; },
+        }
+    }
+}
+
+#[test]
+fn test_oct_arr3() {
+    let input = vec![
+        [b'3', b'7', b'7'],
+        [b'0', b'0', b'1'],
+        [b'0', b'0', b'0'],
+    ];
+    for input in input {
+        assert_eq!(oct_to_arr3(arr3_to_oct(&input)), input);
+    }
+    // case with overflow
+    assert_eq!(oct_to_arr3(arr3_to_oct(&[b'7', b'7', b'7'])), [b'3', b'7', b'7']);
+    assert_eq!(oct_to_arr3(arr3_to_oct(&[b'6', b'7', b'7'])), [b'2', b'7', b'7']);
+}
+
+/// Copy this from unstable so it works with stable rust
+pub trait TryFrom<T> where Self: Sized {
+    type Error;
+
+    fn try_from(T) -> Result<Self, Self::Error>;
+}
+
+/// Copy this from unstable so it works with stable rust
+pub trait TryInto<T> where T: Sized {
+    type Error;
+
+    /// Tries to perform the conversion
+    fn try_into(self) -> Result<T, Self::Error>;
+}
+
+impl<S, T> TryInto<T> for S where T: TryFrom<S> {
+    type Error = T::Error;
+
+    fn try_into(self) -> Result<T, Self::Error> {
+        T::try_from(self)
+    }
+}
+
+/// Failable reference-to-reference conversion
+pub trait TryAsRef<T> {
+    type Error;
+
+    /// Tries to get a reference
+    fn try_as_ref(&self) -> Result<&T, Self::Error>;
+}
+
+/*
+/// Convert a `Vec<Option<T>>` to `Option<Vec<T>>`
+pub fn lift_option<I, T>(i: I) -> Option<Vec<T>>
+where I: Iterator<Item=Option<T>>
+{
+    let mut collector = Vec::new();
+
+    for el in i {
+        match el {
+            Some(el) => { collector.push(el); },
+            None => { return None; }
+        }
+    }
+
+    Some(collector)
+}
+
+/// Just injects a logging message
+macro_rules! warn_none {
+    ($e:expr, $msg:expr) => {{
+        let out = $e;
+        if let None = out {
+            warn!($msg)
+        }
+        out
+    }}
+}
+
+*/
