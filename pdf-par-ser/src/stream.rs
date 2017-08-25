@@ -42,28 +42,28 @@ impl Downcast<Primitive> for DecodeParams {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct StreamParams {
     /// The length of the stream
-    length: MaybeRef<i64>,
+    pub length: MaybeRef<u64>,
     /// The filter or filters to use
-    filter: Option<MaybeRef<Filter>>,
+    pub filter: Option<MaybeRef<Filter>>,
     /// Decode params for the filter or filters
-    decode_params: Option<MaybeRef<DecodeParams>>,
+    pub decode_params: Option<MaybeRef<DecodeParams>>,
     /// The file containing the stream data
-    file: Option<()>, // todo
+    pub file: Option<()>, // todo
     /// like filter, but stream is remote file
-    file_filter: Option<MaybeRef<Filter>>,
+    pub file_filter: Option<MaybeRef<Filter>>,
     /// like decode_params, but stream is remote file
-    file_decode_params: Option<MaybeRef<DecodeParams>>,
+    pub file_decode_params: Option<MaybeRef<DecodeParams>>,
     /// the number of bytes of the decoded stream, after filters are applied
-    decompressed_length: Option<MaybeRef<i64>>,
+    pub decompressed_length: Option<MaybeRef<u64>>,
     /// the remaining dictionary entries (if any)
-    other_params: Dictionary,
+    pub other_params: Dictionary,
 }
 
 impl ParseFrom<Dictionary> for StreamParams {
     fn parse_from(d: Dictionary) -> Result<StreamParams> {
         let mut d = d.0;
         let length = match d.remove(&b"Length"[..]) {
-            Some(l) => <MaybeRef<i64> as Downcast<Primitive>>::downcast(l)?,
+            Some(l) => <MaybeRef<u64> as Downcast<Primitive>>::downcast(l)?,
             None => bail!(ErrorKind::MissingDictionaryField("Length".into(), "StreamParams")),
         };
 
@@ -88,7 +88,7 @@ impl ParseFrom<Dictionary> for StreamParams {
         } else { None };
 
         let decompressed_length = if let Some(p) = d.remove(&b"DL"[..]) {
-            Some(<MaybeRef<i64> as Downcast<Primitive>>::downcast(p)?)
+            Some(<MaybeRef<u64> as Downcast<Primitive>>::downcast(p)?)
         } else { None };
 
         Ok(StreamParams {

@@ -344,6 +344,12 @@ impl Downcast<Primitive> for i64 {
     }
 }
 
+impl Downcast<Primitive> for u64 {
+    fn downcast(from: Primitive) -> Result<u64> {
+        Ok(<i64 as Downcast<Primitive>>::downcast(from)? as u64)
+    }
+}
+
 impl Downcast<Primitive> for BigDecimal {
     fn downcast(from: Primitive) -> Result<BigDecimal> {
         let num = Numeric::downcast(from)?;
@@ -805,11 +811,39 @@ impl Parse for Primitive {
 ///
 /// > Note: although it is allowed, don't use `T=Ref` in a MaybeRef.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum MaybeRef<T> where T: ParseFrom<Primitive> {
+pub enum MaybeRef<T> {
     /// Object is behind a reference
     Ref(Ref),
     /// Object is not behind a reference
     Direct(T),
+}
+
+impl<T> MaybeRef<T> {
+    /// Converts to an option using the direct value
+    pub fn direct(self) -> Option<T> {
+        match self {
+            MaybeRef::Ref(_) => None,
+            MaybeRef::Direct(t) => Some(t)
+        }
+    }
+
+    /// Converts to an option using the ref value
+    pub fn reference(self) -> Option<Ref> {
+        match self {
+            MaybeRef::Ref(r) => Some(r),
+            MaybeRef::Direct(_) => None
+        }
+    }
+
+    /// Maps the direct value, if it is present, and changes the type
+    pub fn map<U, F>(self, f: F) -> MaybeRef<U>
+        where F: FnOnce(T) -> U
+    {
+        match self {
+            MaybeRef::Ref(r) => MaybeRef::Ref(r),
+            MaybeRef::Direct(t) => MaybeRef::Direct(f(t))
+        }
+    }
 }
 
 impl<T> MaybeRef<T> where T: ParseFrom<Primitive> {

@@ -33,6 +33,9 @@ error_chain! {
         }
 
         // Specific errors
+        ReferenceInXRefDictionary {
+            description("objects in the xref dictionary cannot be indirect references")
+        }
         UnresolvedReference(ref_: primitive::Ref) {
             description("a reference could not be resolved")
             display(r#"the reference with obj number "{}" and gen number "{}" could not be found"#,

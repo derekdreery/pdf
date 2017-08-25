@@ -3,9 +3,10 @@ use std::collections::HashMap;
 
 use nom::{self, IResult};
 
-use primitive::{Ref, PdfString, Primitive, parse_dictionary};
+use primitive::{Name, Ref, PdfString, Array, Primitive, parse_dictionary};
+use stream::{Filter, DecodeParams, StreamParams};
 use util::{xref_eol};
-use {Parse, Downcast, Result, ErrorKind, Error};
+use {Parse, ParseFrom, Downcast, Result, ErrorKind, Error};
 
 /// A cross reference entry can either be in use, or free
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
@@ -154,6 +155,120 @@ impl Parse for Trailer {
             encrypt: (), // todo
             info,
             id,
+        })
+    }
+}
+
+/// A set of stream params with extra entries for the contained xref table
+pub struct XRefStreamParams {
+    /// The length of the stream
+    length: u64,
+    /// The filter or filters to use
+    filter: Option<Filter>,
+    /// Decode params for the filter or filters
+    decode_params: Option<DecodeParams>,
+    /// The file containing the stream data
+    file: Option<()>, // todo
+    /// like filter, but stream is remote file
+    file_filter: Option<Filter>,
+    /// like decode_params, but stream is remote file
+    file_decode_params: Option<DecodeParams>,
+    /// the number of bytes of the decoded stream, after filters are applied
+    decompressed_length: Option<u64>,
+    /// The number one greater than the highest object number used in this section or in any
+    /// section for which this is an update. It is equivalent to the Size entry in a trailer
+    /// dictionary.
+    size: u64,
+    /// An array containing a pair of integers for each subsection in this section. The first
+    /// integer is the first object number in the subsection; the second integer is the number
+    /// of entries in the subsection
+    ///
+    /// The array is sorted in ascending order by object number. Subsections cannot overlap; an
+    /// object number may have at most one entry in a section.
+    ///
+    /// Default value: [0 Size].
+    index: Option<Vec<(u64, u64)>>,
+    /// The byte offset from the beginning of the file to the beginning of the previous
+    /// cross-reference stream. This entry has the same function as the `Prev` entry in the
+    /// trailer dictionary (Table 3.13).
+    prev: Option<u64>,
+}
+
+/// helper function to convert None into an error, should never really be hit in practice
+#[inline]
+fn ref_error<T>(i: Option<T>) -> Result<T> {
+    i.ok_or(Error::from(ErrorKind::ReferenceInXRefDictionary))
+}
+
+/// Macro to avoid writing the same thing out many times
+macro_rules! make_direct {
+    ($id:ident) => {
+        match $id {
+            Some(t) => Some(ref_error(t.direct())?),
+            None => None
+        }
+    }
+}
+
+
+impl ParseFrom<StreamParams> for XRefStreamParams {
+    fn parse_from(i: StreamParams) -> Result<XRefStreamParams> {
+        let StreamParams {
+            length,
+            filter,
+            decode_params,
+            file,
+            file_filter,
+            file_decode_params,
+            decompressed_length,
+            mut other_params
+        } = i;
+        // Check this is an xref dict
+        match other_params.remove(&b"Type"[..]) {
+            Some(ty) => {
+                let ty = Name::downcast(ty)?;
+                if &ty != &b"XRef"[..] {
+                    bail!(ErrorKind::IncorrectType(ty.into(), "XRef"));
+                }
+            },
+            None => bail!(ErrorKind::MissingDictionaryField("Type".into(), "XRefStreamParams"))
+        };
+
+        let size = other_params.remove(&b"Size"[..]).ok_or(
+            ErrorKind::MissingDictionaryField("Size".into(), "XRefStreamParams"))?;
+        let size: u64 = Downcast::downcast(size)?;
+
+        let index = match other_params.remove(&b"Index"[..]) {
+            Some(i) => {
+                let arr = Primitive::downcast_array_of::<u64>(i)?;
+                if arr.len() % 2 != 0 {
+                    bail!("array must have even number of elements");
+                }
+                let mut v = Vec::with_capacity(arr.len() / 2);
+                let mut arr = arr.into_iter();
+                while let Some(first) = arr.next() {
+                    v.push((first, arr.next().unwrap())) // cannot fail
+                }
+                Some(v)
+            },
+            None => None
+        };
+
+        let prev = if let Some(i) = other_params.remove(&b"Prev"[..]) {
+            Some(<u64 as Downcast<Primitive>>::downcast(i)?)
+        } else { None };
+
+        Ok(XRefStreamParams {
+            length: ref_error(length.direct())?,
+            filter: make_direct!(filter),
+            decode_params: make_direct!(decode_params),
+            file: None,
+            file_filter: make_direct!(file_filter),
+            file_decode_params: make_direct!(file_decode_params),
+            decompressed_length: make_direct!(decompressed_length),
+            size,
+            index,
+            prev,
         })
     }
 }

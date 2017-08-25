@@ -54,6 +54,10 @@ impl<'a> XRef<'a> {
         })
     }
 
+    pub fn from_stream_object(data: &'a [u8], offset: usize) -> Result<XRef<'a>> {
+        unimplemented!();
+    }
+
     /// Use the information in the header to fetch an entry in the xref table
     /// Table is the byte array of the xref table, not including the 2 header rows
     pub fn entry(&self, obj: u64) -> Result<XRefEntry> {
