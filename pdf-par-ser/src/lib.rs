@@ -20,6 +20,7 @@ extern crate itertools;
 mod error;
 #[macro_use] mod util;
 pub mod primitive;
+pub mod stream;
 pub mod file;
 pub mod xref;
 pub mod document;

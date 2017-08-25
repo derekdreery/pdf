@@ -13,6 +13,7 @@ use bigdecimal::BigDecimal;
 use nom::{self, IResult};
 use itertools::Itertools;
 
+use stream::StreamParams;
 use util::{arr3_to_oct, oct_to_arr3, ascii_hex_to_u8, decode_number_sign, eat_pdf_ws,
     parse_pos_num, is_whitespace, is_normal_char, TryAsRef};
 use {Parse, ParseFrom, Downcast, Error, ErrorKind, Result};
@@ -55,13 +56,13 @@ macro_rules! newtype_impl {
 
 macro_rules! newtype {
     ($name:path { $wrap:path }) => {
-        #[derive(Debug, Eq, PartialEq, Clone)]
+        #[derive(Eq, PartialEq, Clone)]
         pub struct $name(pub $wrap);
         newtype_impl!($name { $wrap });
     };
     ($(#[$attr:meta])*, $name:ident { $wrap:path }) => {
         $(#[$attr])*
-        #[derive(Debug, Eq, PartialEq, Clone)]
+        #[derive(Eq, PartialEq, Clone)]
         pub struct $name(pub $wrap);
         newtype_impl!($name { $wrap });
     };
@@ -71,7 +72,7 @@ newtype!(#[doc = "A pdf comment (one of the basic objects, not strictly in spec 
          #[derive(Hash)],
          Comment { Vec<u8> });
 newtype!(#[doc = "A pdf boolean (one of the basic objects)"]
-         #[derive(Copy, Hash)],
+         #[derive(Copy, Hash, Debug)],
          Boolean { bool });
 
 /// A pdf numeric (one of the basic objects)
@@ -90,9 +91,25 @@ newtype!(#[doc = "A pdf string (one of the basic objects)"]
          #[derive(Hash)], PdfString { Vec<u8> });
 newtype!(#[doc = "A pdf name (one of the basic objects)"]
          #[derive(Hash)], Name { Vec<u8> });
-newtype!(#[doc = "A pdf array (one of the basic objects)"], Array { Vec<Primitive> });
-newtype!(#[doc = "A pdf dictionary (one of the basic objects)"],
-         Dictionary { HashMap<Vec<u8>, Primitive> });
+newtype!(#[doc = "A pdf array (one of the basic objects)"]
+         #[derive(Debug)], Array { Vec<Primitive> });
+
+impl Array {
+    /// Cast to a vec of a given type, failing if any of the vec are the wrong type
+    pub fn downcast_of<T>(self) -> Result<Vec<T>>
+        where T: Downcast<Primitive>
+    {
+        let mut out: Vec<T> = Vec::with_capacity(self.len());
+        for el in self.0.into_iter() {
+            let el: T = T::downcast(el)?;
+            out.push(el);
+        }
+        Ok(out)
+    }
+}
+
+newtype!(#[doc = "A pdf dictionary (one of the basic objects)"]
+         #[derive(Debug)], Dictionary { HashMap<Vec<u8>, Primitive> });
 
 /// A pdf stream primitive (one of the basic objects)
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -101,7 +118,7 @@ pub struct Stream {
     /// stream contents, it simply records the start of the data
     ///
     /// Note that `length` is an important required param that gives the length of the stream
-    pub params: Dictionary,
+    pub params: StreamParams,
     /// The offset of the start of the stream from the index of the primitive
     pub data_offset: usize
 }
@@ -133,6 +150,14 @@ pub struct Indirect {
     pub inner: Box<Primitive>,
 }
 
+impl Indirect {
+    /// Given a type attempt to cast the boxed primitive to that type
+    pub fn unwrap_as<T>(self) -> Result<T>
+        where T: ParseFrom<Primitive>
+    {
+        T::parse_from(*self.inner)
+    }
+}
 
 /// A reference to a primitive located elsewhere.
 ///
@@ -149,6 +174,25 @@ pub struct Ref {
     /// whole document
     pub gen: u16,
 }
+
+impl Ref {
+    /// When supplied with a method to resolve a reference, will downcast the result into the
+    /// expected type.
+    ///
+    /// This is a heler for higher level libraries
+    pub fn resolve<'a, F, T>(self, resolver: F) -> Result<T>
+        where F: Fn(Ref) -> Option<&'a [u8]>,
+              T: ParseFrom<Primitive>
+    {
+        let data = resolver(self).ok_or(Error::from_kind(ErrorKind::UnresolvedReference(self)))?;
+        let indirect = Indirect::parse(data)?;
+        // check we have the right object
+        debug_assert!(indirect.reference == self);
+        indirect.unwrap_as::<T>()
+    }
+}
+
+
 /// This macro implements some helpful coercions for types similar to [u8]
 macro_rules! as_bytes {
     ($name:path) => {
@@ -182,6 +226,12 @@ macro_rules! as_bytes {
         impl ::std::fmt::Display for $name {
             fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
                 write!(f, "{}", ::std::string::String::from_utf8_lossy(&self.0))
+            }
+        }
+
+        impl ::std::fmt::Debug for $name {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+                write!(f, "{:?}", ::std::string::String::from_utf8_lossy(&self.0))
             }
         }
     };
@@ -552,54 +602,112 @@ named!(#[doc = "Matches a pdf name primitive"], parse_name<Vec<u8>>, do_parse!(
 impl_Parse!(Name, parse_name);
 
 /// Matches a pdf array primitive
-named!(#[doc = "Matches a pdf array primitive"], parse_array<Vec<Primitive>>,
-       pdf_ws!(delimited!(tag!(b"["), pdf_ws!(many0!(parse_primitive)), tag!(b"]"))));
+named!(#[doc = "Matches a pdf array primitive"], parse_array<Result<Vec<Primitive>>>,
+       pdf_ws!(delimited!(tag!(b"["), pdf_ws!(fold_many0!(
+            parse_primitive,
+            Ok(Vec::new()),
+            |mut acc: Result<Vec<_>>, item| match item {
+                Ok(item) => {
+                    match &mut acc {
+                        &mut Ok(ref mut acc) => {
+                            acc.push(item);
+                        },
+                        _ => (),
+                    };
+                    acc
+                },
+                Err(e) => Err(e)
+            }
+        )), tag!(b"]"))));
 
-impl_Parse!(Array, parse_array);
+impl Parse for Array {
+    fn parse(i: &[u8]) -> Result<Array> {
+        match parse_array(i) {
+            IResult::Done(_, Ok(a)) => Ok(Array(a)),
+            IResult::Done(_, Err(e)) => bail!(e),
+            IResult::Error(e) => bail!(ErrorKind::ParserError(format!("{:?}", e))),
+            IResult::Incomplete(n) => bail!(ErrorKind::ParserIncomplete(n))
+        }
+    }
+}
 
 /// Matches a pdf dictionary primitive
+///
+/// This actually supports nested streams, although that never happens in practice
 named!(#[doc = "Matches a pdf dictionary primitive"],
-       pub(crate) parse_dictionary<HashMap<Vec<u8>, Primitive>>,
+       pub(crate) parse_dictionary<Result<HashMap<Vec<u8>, Primitive>>>,
     pdf_ws!(delimited!(tag!(b"<<"), pdf_ws!(fold_many0!(
         pdf_ws!(tuple!(parse_name, parse_primitive)),
-        HashMap::new(),
-        |mut acc: HashMap<Vec<u8>, Primitive>, (name, value): (Vec<u8>, _)| {
-            acc.insert(name.into(), value);
-            acc
-        }
+        Ok(HashMap::new()),
+        |mut acc: Result<HashMap<Vec<u8>, Primitive>>, (name, value): (Vec<u8>, _)|
+            match value {
+                Ok(prim) => {
+                    match &mut acc {
+                        &mut Ok(ref mut inner) => {
+                            inner.insert(name.into(), prim);
+                        },
+                        _ => ()
+                    };
+                    acc
+                },
+                Err(e) => Err(e)
+            }
     )), tag!(b">>")))
 );
 
-impl_Parse!(Dictionary, parse_dictionary);
+impl Parse for Dictionary {
+    fn parse(i: &[u8]) -> Result<Dictionary> {
+        match parse_dictionary(i) {
+            IResult::Done(_, Ok(d)) => Ok(Dictionary(d)),
+            IResult::Done(_, Err(e)) => bail!(e),
+            IResult::Error(e) => bail!(ErrorKind::ParserError(format!("{:?}", e))),
+            IResult::Incomplete(n) => bail!(ErrorKind::ParserIncomplete(n))
+        }
+    }
+}
+
 
 /// Matches either a dictionary or a stream
 ///
 /// It's efficient to detect a dictionary, then use it for a stream if it is a stream, or just
-/// return a dictionary if not
-fn parse_dictionary_or_stream(input: &[u8]) -> IResult<&[u8], Primitive> {
+/// return a dictionary if not. We have to return a result of result, to aid error checking further
+/// down
+fn parse_dictionary_or_stream(input: &[u8]) -> IResult<&[u8], Result<Primitive>> {
     let (input_, params) = try_parse!(input, parse_dictionary);
     debug!("Detect whether we are in a stream");
-    match do_parse!(input_,
-                    _pre_ws: eat_pdf_ws >>
-                    tag!(b"stream") >>
-                    _post_ws: alt!(tag!(b"\n") | tag!(b"\r\n")) >>
-                    ()
-                    ) {
-        IResult::Done(i, _) => IResult::Done(i, Primitive::Stream(Stream {
-            params: Dictionary(params),
-            data_offset: input.len() - i.len(),
-        })),
-        IResult::Incomplete(needed) => IResult::Incomplete(needed),
-        IResult::Error(_) => IResult::Done(input_, Primitive::Dictionary(Dictionary(params)))
-    }
+    // TODO check end of stream consistency with length
+    let (input_, data_offset) = match do_parse!(input_,
+        eat_pdf_ws >>
+        tag!(b"stream") >>
+        alt!(tag!(b"\n") | tag!(b"\r\n")) >>
+        ())
+    {
+        IResult::Done(i, _) => (i, input.len() - i.len()),
+        IResult::Incomplete(needed) => { return IResult::Incomplete(needed); },
+        IResult::Error(_) => {
+            return IResult::Done(input_, params.map(|p| Primitive::Dictionary(Dictionary(p))))
+        }
+    };
+
+    let out = params.map(Dictionary)
+        .and_then(|params| StreamParams::parse_from(params))
+        .map(|sparams|
+            Primitive::Stream(Stream {
+                params: sparams,
+                data_offset,
+            })
+        );
+
+    IResult::Done(input_, out)
 }
 
 impl Parse for Stream {
     fn parse(i: &[u8]) -> Result<Stream> {
         match parse_dictionary_or_stream(i) {
-            IResult::Done(_, Primitive::Stream(s)) => Ok(s),
-            IResult::Done(_, _)
+            IResult::Done(_, Ok(Primitive::Stream(s))) => Ok(s),
+            IResult::Done(_, Ok(_))
                 => bail!(ErrorKind::UnexpectedToken("Dictionary".into(), "Stream")),
+            IResult::Done(_, Err(e)) => bail!(e),
             IResult::Error(e) => bail!(ErrorKind::ParserError(format!("{:?}", e))),
             IResult::Incomplete(n) => bail!(ErrorKind::ParserIncomplete(n))
         }
@@ -637,19 +745,23 @@ impl Parse for Ref {
 }
 
 
-named!(parse_indirect<Indirect>, pdf_ws!(do_parse!(
+named!(parse_indirect<(Ref, Result<Primitive>)>, pdf_ws!(do_parse!(
     obj: flat_map!(call!(nom::digit), parse_to!(u64)) >>
     gen: flat_map!(call!(nom::digit), parse_to!(u16)) >>
     tag!(b"obj") >>
     inner: parse_primitive >>
     tag!(b"endobj") >>
-    (Indirect { reference: Ref { obj, gen }, inner: Box::new(inner) })
+    ((Ref { obj, gen }, inner))
 )));
 
 impl Parse for Indirect {
     fn parse(i: &[u8]) -> Result<Indirect> {
         match parse_indirect(i) {
-            IResult::Done(_, ind) => Ok(ind), // this is why we can't use macro
+            IResult::Done(_, (reference, Ok(inner))) => Ok(Indirect {
+                reference,
+                inner: Box::new(inner)
+            }),
+            IResult::Done(_, (_, Err(e))) => Err(e),
             IResult::Error(e) => bail!(ErrorKind::ParserError(format!("{:?}", e))),
             IResult::Incomplete(n) => bail!(ErrorKind::ParserIncomplete(n))
         }
@@ -660,24 +772,26 @@ impl Parse for Indirect {
 ///
 /// The order does not match the defined order as it is significant - more specific parsers must
 /// come before less specific parsers, since the grammar is ambiguous.
-named!(parse_primitive<Primitive>, alt!(
+named!(parse_primitive<Result<Primitive>>, alt!(
     // needs to be above integer
-    map!(call!(parse_indirect), Primitive::Indirect) |
-    map!(call!(parse_null), |_| Primitive::Null(Null)) |
-    map!(call!(parse_ref), Primitive::Ref) |
-    map!(call!(parse_boolean), |t| Primitive::Boolean(Boolean(t))) |
-    map!(call!(parse_array), |t| Primitive::Array(Array(t))) |
-    map!(call!(parse_name), |t| Primitive::Name(Name(t))) |
-    map!(call!(parse_string), |t| Primitive::String(PdfString(t))) |
+    map!(call!(parse_indirect), |(reference, inner)|
+         inner.map(|inner| Primitive::Indirect(Indirect { reference, inner: Box::new(inner) } ))) |
+    map!(call!(parse_null), |_| Ok(Primitive::Null(Null))) |
+    map!(call!(parse_ref), |t| Ok(Primitive::Ref(t))) |
+    map!(call!(parse_boolean), |t| Ok(Primitive::Boolean(Boolean(t)))) |
+    map!(call!(parse_array), |t| t.map(|arr| Primitive::Array(Array(arr)))) |
+    map!(call!(parse_name), |t| Ok(Primitive::Name(Name(t)))) |
+    map!(call!(parse_string), |t| Ok(Primitive::String(PdfString(t)))) |
     parse_dictionary_or_stream |
-    map!(call!(parse_comment), |t| Primitive::Comment(Comment(t))) |
-    map!(call!(parse_numeric), Primitive::Numeric)
+    map!(call!(parse_comment), |t| Ok(Primitive::Comment(Comment(t)))) |
+    map!(call!(parse_numeric), |t| Ok(Primitive::Numeric(t)))
 ));
 
 impl Parse for Primitive {
     fn parse(i: &[u8]) -> Result<Primitive> {
         match parse_primitive(i) {
-            IResult::Done(_, p) => Ok(p),
+            IResult::Done(_, Ok(p)) => Ok(p),
+            IResult::Done(_, Err(e)) => Err(e),
             IResult::Error(e) => bail!(ErrorKind::ParserError(format!("{:?}", e))),
             IResult::Incomplete(n) => bail!(ErrorKind::ParserIncomplete(n))
         }
@@ -688,12 +802,42 @@ impl Parse for Primitive {
 
 /// This is a helper type, when we want to express that we must have a specific type of primitive,
 /// but that it may be behind a reference
-#[derive(Debug, Clone, Eq, PartialEq)]
+///
+/// > Note: although it is allowed, don't use `T=Ref` in a MaybeRef.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum MaybeRef<T> where T: ParseFrom<Primitive> {
     /// Object is behind a reference
     Ref(Ref),
     /// Object is not behind a reference
     Direct(T),
+}
+
+impl<T> MaybeRef<T> where T: ParseFrom<Primitive> {
+    /// When supplied with a method to resolve a reference, will downcast the result into the
+    /// expected type.
+    pub fn resolve<'a, F>(self, resolver: F) -> Result<T>
+        where F: Fn(Ref) -> Option<&'a [u8]>
+    {
+        let r = match self {
+            MaybeRef::Ref(r) => r,
+            MaybeRef::Direct(t) => { return Ok(t); }
+        };
+        let data = resolver(r).ok_or(Error::from_kind(ErrorKind::UnresolvedReference(r)))?;
+        let indirect = Indirect::parse(data)?;
+        // check we have the right object
+        debug_assert!(indirect.reference == r);
+        indirect.unwrap_as::<T>()
+    }
+}
+
+impl<T> Downcast<Primitive> for MaybeRef<T> where T: Downcast<Primitive> {
+    fn downcast(p: Primitive) -> Result<MaybeRef<T>> {
+        match &p {
+            &Primitive::Ref(r) => { return Ok(MaybeRef::Ref(r)); },
+            _ => ()
+        };
+        Ok(MaybeRef::Direct(T::downcast(p)?))
+    }
 }
 
 /*

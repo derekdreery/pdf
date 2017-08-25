@@ -3,6 +3,7 @@
 use primitive::{Dictionary, Array, Boolean, Ref, Primitive, Name, PdfString, MaybeRef};
 use file::{PdfVersion};
 use {ErrorKind, Result, Parse, ParseFrom, Downcast};
+use std::fmt;
 
 /// A name object specifying the page layout to be used when the document is opened:
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -47,6 +48,19 @@ impl ParseFrom<Primitive> for PageLayout {
     fn parse_from(i: Primitive) -> Result<PageLayout> {
         let i = Name::downcast(i)?;
         PageLayout::parse(&i)
+    }
+}
+
+impl fmt::Display for PageLayout {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            &PageLayout::SinglePage => write!(f, "single page"),
+            &PageLayout::OneColumn => write!(f, "one column"),
+            &PageLayout::TwoColumnLeft => write!(f, "two columns, odd pages on left"),
+            &PageLayout::TwoColumnRight => write!(f, "two columns, odd pages on right"),
+            &PageLayout::TwoPageLeft => write!(f, "two pages at a time, odd pages on left"),
+            &PageLayout::TwoPageRight => write!(f, "two pages at a time, odd pages on right"),
+        }
     }
 }
 
@@ -95,6 +109,19 @@ impl ParseFrom<Primitive> for PageMode {
         PageMode::parse(&i)
     }
 }
+impl fmt::Display for PageMode {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            &PageMode::UseNone => write!(f, "display nothing"),
+            &PageMode::UseOutlines => write!(f, "display document outline"),
+            &PageMode::UseThumbs => write!(f, "display page thumbnails"),
+            &PageMode::FullScreen => write!(f, "display fullscreen"),
+            &PageMode::UseOC => write!(f, "display optional content group"),
+            &PageMode::UseAttachments => write!(f, "display attachments"),
+        }
+    }
+}
+
 
 /// The document's root catalog
 ///

@@ -20,6 +20,7 @@ mod xref;
 mod document;
 mod reader;
 
-pub use pdf_par_ser::file::PdfVersion;
+pub use file::PdfVersion;
 pub use reader::PdfReader;
+pub use pdf_par_ser::document::{PageLayout, PageMode};
 pub use error::*;

@@ -10,12 +10,14 @@ use pdf::{PdfReader, Result};
 
 fn run() -> Result<()> {
     //pretty_env_logger::init().unwrap();
-    println!("Opening a memmap to file");
+    println!("> Opening a memmap to file");
     let file = Mmap::open_path("pdf_reference_1-7.pdf", Protection::Read).unwrap();
     // The unsafety comes from concurrent acces, which we will not do.
-    println!("Initializing pdf reader");
+    println!("> Initializing pdf reader");
     let pdf_file = PdfReader::from_bytes(unsafe { file.as_slice() })?;
     println!("Pdf version: {}", pdf_file.version().unwrap());
+    println!("Pdf page mode: {}", pdf_file.page_mode()?.unwrap_or_default());
+    println!("Pdf page layout: {}", pdf_file.page_layout()?.unwrap_or_default());
     Ok(())
 }
 

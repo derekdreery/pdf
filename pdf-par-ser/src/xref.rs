@@ -84,6 +84,7 @@ named!(parse_xref_header<(u64, u64)>, pdf_ws!(do_parse!(
 pub struct Trailer {
     pub size: u64,
     pub prev: Option<u64>,
+    pub x_ref_stm: Option<u64>,
     pub root: Ref,
     pub encrypt: (), // todo
     pub info: Option<Ref>,
@@ -92,7 +93,7 @@ pub struct Trailer {
 
 /// Parses a trailer object.
 // Use remove to avoid unnecessary copies
-named!(parse_trailer<HashMap<Vec<u8>, Primitive> >, pdf_ws!(do_parse!(
+named!(parse_trailer<Result<HashMap<Vec<u8>, Primitive>>>, pdf_ws!(do_parse!(
     tag!(b"trailer") >>
     trailer_dict: parse_dictionary >>
     (trailer_dict)
@@ -102,7 +103,8 @@ impl Parse for Trailer {
     fn parse(i: &[u8]) -> Result<Trailer> {
         debug!("parsing trailer dictionary");
         let mut trailer_dict = match parse_trailer(i) {
-            IResult::Done(_, dict) => dict,
+            IResult::Done(_, Ok(dict)) => dict,
+            IResult::Done(_, Err(e)) => bail!(e),
             IResult::Incomplete(n) => bail!(ErrorKind::ParserIncomplete(n)),
             IResult::Error(e) => bail!(ErrorKind::ParserError(format!("{:?}", e)))
         };
@@ -135,6 +137,11 @@ impl Parse for Trailer {
             Some(<i64 as Downcast<Primitive>>::downcast(p)? as u64)
         } else { None };
 
+        debug!("trailer: parsing x_ref_stm");
+        let x_ref_stm = if let Some(p) = trailer_dict.remove(&b"XRefStm"[..]) {
+            Some(<i64 as Downcast<Primitive>>::downcast(p)? as u64)
+        } else { None };
+
         let info = if let Some(info) = trailer_dict.remove(&b"Info"[..]) {
             Some(Ref::downcast(info)?)
         } else { None };
@@ -142,6 +149,7 @@ impl Parse for Trailer {
         Ok(Trailer {
             size,
             prev,
+            x_ref_stm,
             root,
             encrypt: (), // todo
             info,
@@ -173,14 +181,12 @@ mod tests {
 
     #[test]
     fn xref_header() {
-        test_helper!(parse_xref_header => [
-            (b"xref\n1000 5\n",
-             IResult::Done(&b""[..], XRefHeader {
-                 start_obj: 1000,
-                 num_entries: 5,
-             }),
-             "xref\\n1000 5\\n")
-        ]);
+        assert_eq!(XRefHeader::parse(&b"xref\n1000 5\n"[..]).ok(),
+            Some(XRefHeader {
+                start_obj: 1000,
+                num_entries: 5,
+                byte_length: 12,
+            }));
     }
 
     #[test]
@@ -198,6 +204,7 @@ trailer
         let expected = Trailer {
             size: 22,
             prev: None,
+            x_ref_stm: None,
             root: Ref { obj: 2, gen: 0 },
             encrypt: (), // todo
             info: Some(Ref { obj: 1, gen: 0 }),
