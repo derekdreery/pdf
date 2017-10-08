@@ -29,10 +29,9 @@ impl Default for PageLayout {
     }
 }
 
-impl Parse<Name> for PageLayout {
-    fn parse(i: &Name) -> Result<PageLayout> {
-        let r: &[u8] = i.as_ref();
-        match r {
+impl<'a> ParseFrom<&'a Name> for PageLayout {
+    fn parse_from(i: &'a Name) -> Result<PageLayout> {
+        match i.as_slice() {
             b"SinglePage" => Ok(PageLayout::SinglePage),
             b"OneColumn" => Ok(PageLayout::OneColumn),
             b"TwoColumnLeft" => Ok(PageLayout::TwoColumnLeft),
@@ -47,7 +46,7 @@ impl Parse<Name> for PageLayout {
 impl ParseFrom<Primitive> for PageLayout {
     fn parse_from(i: Primitive) -> Result<PageLayout> {
         let i = Name::downcast(i)?;
-        PageLayout::parse(&i)
+        PageLayout::parse_from(&i)
     }
 }
 
@@ -88,10 +87,9 @@ impl Default for PageMode {
 }
 
 
-impl Parse<Name> for PageMode {
-    fn parse(i: &Name) -> Result<PageMode> {
-        let r: &[u8] = i.as_ref();
-        match r {
+impl<'a> ParseFrom<&'a Name> for PageMode {
+    fn parse_from(i: &'a Name) -> Result<PageMode> {
+        match i.as_slice() {
             b"UseNone" => Ok(PageMode::UseNone),
             b"UseOutlines" => Ok(PageMode::UseOutlines),
             b"UseThumbs" => Ok(PageMode::UseThumbs),
@@ -106,7 +104,7 @@ impl Parse<Name> for PageMode {
 impl ParseFrom<Primitive> for PageMode {
     fn parse_from(i: Primitive) -> Result<PageMode> {
         let i = Name::downcast(i)?;
-        PageMode::parse(&i)
+        PageMode::parse_from(&i)
     }
 }
 impl fmt::Display for PageMode {
@@ -225,7 +223,7 @@ impl ParseFrom<Dictionary> for Catalog {
         let version = match dict.remove(&b"Version"[..]) {
             Some(ent) => {
                 let v_name = Name::downcast(ent)?;
-                Some(PdfVersion::parse(&v_name)?)
+                Some(PdfVersion::parse_from(&v_name)?)
             },
             None => None
         };
@@ -271,7 +269,7 @@ impl ParseFrom<Dictionary> for Catalog {
         let page_layout = if let Some(pl) = page_layout {
             match pl {
                 Primitive::Ref(r) => Some(MaybeRef::Ref(r)),
-                Primitive::Name(n) => Some(MaybeRef::Direct(PageLayout::parse(&n)?)),
+                Primitive::Name(n) => Some(MaybeRef::Direct(PageLayout::parse_from(&n)?)),
                 _ => bail!(ErrorKind::IncorrectType("<T>".into(), "Ref or Name"))
             }
         } else { None };
@@ -280,7 +278,7 @@ impl ParseFrom<Dictionary> for Catalog {
         let page_mode = if let Some(pm) = page_mode {
             match pm {
                 Primitive::Ref(r) => Some(MaybeRef::Ref(r)),
-                Primitive::Name(n) => Some(MaybeRef::Direct(PageMode::parse(&n)?)),
+                Primitive::Name(n) => Some(MaybeRef::Direct(PageMode::parse_from(&n)?)),
                 _ => bail!(ErrorKind::IncorrectType("<T>".into(), "Ref or PageMode"))
             }
         } else { None };

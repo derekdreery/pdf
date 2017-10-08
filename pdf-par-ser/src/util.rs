@@ -116,12 +116,27 @@ pub fn is_normal_char(ch: u8) -> bool {
 
 named!(#[doc = "parse a line ending in a pdf file"],
        pub pdf_eol,
-       alt!(tag!(b"\r") | tag!(b"\n") | tag!(b"\r\n")));
+       alt!(tag!(b"\r\n") | tag!(b"\r") | tag!(b"\n")));
 
 named!(#[doc = "Line endings are different for xref records to preserve alignment \
                 (\\r and \\n are preceeded by ` `)"],
        pub xref_eol,
        alt!(tag!(b" \r") | tag!(b" \n") | tag!(b"\r\n")));
+
+/// Takes a byte array and returns an escaped string of ascii
+#[cfg(test)]
+pub fn u8_to_esc_ascii(i: &[u8]) -> String {
+    use std::char;
+    use std::ascii;
+
+    let mut s = String::new();
+    for &ch in i {
+        for ech in ascii::escape_default(ch) {
+            s.push(char::from_u32(ech as u32).unwrap()) // should never fail (from escape default)
+        }
+    }
+    s
+}
 
 #[cfg(test)]
 /// Helper macro to test some input and output against a parser
@@ -129,15 +144,10 @@ macro_rules! test_helper {
     ($fn:ident => [ $( ( $input:expr, $output:expr ) ),+ ] ) => {{
         $(
             assert_eq!(super::$fn(&$input[..])
-                       /**/.map_err(|_err| error_code!(nom::ErrorKind::Custom(0)))/**/, $output);
+                       /*.map_err(|_err| error_code!(nom::ErrorKind::Custom(0)))*/, $output,
+                       r#""{}""#, ::util::u8_to_esc_ascii($input));
         )+
     }};
-    ($fn:ident => [ $( ( $input:expr, $output:expr, $msg:expr ) ),+ ] ) => {{
-        $(
-            assert_eq!(super::$fn(&$input[..])
-                       /*.map_err(|_err| error_code!(ErrorKind::Custom(0)))*/, $output, $msg);
-        )+
-    }}
 }
 
 #[cfg(test)]
@@ -209,6 +219,32 @@ pub trait TryAsRef<T> {
     fn try_as_ref(&self) -> Result<&T, Self::Error>;
 }
 
+/// Like dbg_dmp in nom, but limits the size of the hex dump to 10k
+macro_rules! my_dbg_dmp (
+  ($i: expr, $submac:ident!( $($args:tt)* ), $max_dmp:expr) => (
+    {
+      use nom::HexDisplay;
+      let l = line!();
+      match $submac!($i, $($args)*) {
+        ::nom::IResult::Error(a) => {
+          println!("Error({:?}) at l.{} by ' {} '\n{}", a, l, stringify!($submac!($($args)*)),
+                   &$i[0..::std::cmp::min($i.len(), $max_dmp)].to_hex(8));
+          ::nom::IResult::Error(a)
+        },
+        ::nom::IResult::Incomplete(a) => {
+          println!("Incomplete({:?}) at {} by ' {} '\n{}", a, l, stringify!($submac!($($args)*)),
+                   &$i[0..::std::cmp::min($i.len(), $max_dmp)].to_hex(8));
+          ::nom::IResult::Incomplete(a)
+        },
+        a => a
+      }
+    }
+  );
+
+  ($i:expr, $f:ident) => (
+      dbg_dmp!($i, call!($f));
+  );
+);
 /*
 /// Convert a `Vec<Option<T>>` to `Option<Vec<T>>`
 pub fn lift_option<I, T>(i: I) -> Option<Vec<T>>

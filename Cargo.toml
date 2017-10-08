@@ -6,6 +6,7 @@ authors = ["Richard Dodd <richard.o.dodd@gmail.com>"]
 [dependencies]
 nom = { version = "*", features = ["verbose-errors"] }
 pdf-par-ser = { path = "./pdf-par-ser", version = "*" }
+pdf-filters = { path = "./pdf-filters", version = "*" }
 error-chain = "*"
 bigdecimal = "*"
 num = "*"

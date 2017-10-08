@@ -3,7 +3,7 @@ use std::str;
 use std::fmt;
 use nom::{self, IResult};
 
-use {util, Parse};
+use {util, Parse, ParseFrom};
 use primitive::{Name};
 use error::*;
 
@@ -27,11 +27,11 @@ named!(#[doc = "Parse the version string at the beginning of a pdf file"],
 
 
 impl Parse for PdfVersion {
-    fn parse(i: &[u8]) -> Result<PdfVersion> {
+    fn parse(i: &[u8]) -> Result<(usize, PdfVersion)> {
         match parse_version(i) {
-            IResult::Done(_, v) => Ok(v),
+            IResult::Done(o, v) => Ok((i.len() - o.len(), v)),
             IResult::Incomplete(n) => bail!(ErrorKind::ParserIncomplete(n)),
-            IResult::Error(e) => bail!(ErrorKind::ParserError(format!("{:?}", e))),
+            IResult::Error(e) => bail!(Error::with_chain(e, ErrorKind::ParserError)),
         }
     }
 }
@@ -45,12 +45,12 @@ named!(#[doc = "Parse the version represented by a name in the catalog"],
     (PdfVersion { major, minor })
 ));
 
-impl Parse<Name> for PdfVersion {
-    fn parse(i: &Name) -> Result<PdfVersion> {
+impl<'a> ParseFrom<&'a Name> for PdfVersion {
+    fn parse_from(i: &'a Name) -> Result<PdfVersion> {
         match parse_version_catalog(&i[..]) {
             IResult::Done(_, v) => Ok(v),
             IResult::Incomplete(n) => bail!(ErrorKind::ParserIncomplete(n)),
-            IResult::Error(e) => bail!(ErrorKind::ParserError(format!("{:?}", e))),
+            IResult::Error(e) => bail!(Error::with_chain(e, ErrorKind::ParserError)),
         }
     }
 }
@@ -63,11 +63,11 @@ pub struct Eof;
 named!(#[doc = "Parse the special token at the end of the file"], parse_eof, tag!(b"%%EOF"));
 
 impl Parse for Eof {
-    fn parse(i: &[u8]) -> Result<Eof> {
+    fn parse(i: &[u8]) -> Result<(usize, Eof)> {
         match parse_eof(i) {
-            IResult::Done(_, _) => Ok(Eof),
+            IResult::Done(o, _) => Ok((i.len() - o.len(), Eof)),
             IResult::Incomplete(n) => bail!(ErrorKind::ParserIncomplete(n)),
-            IResult::Error(e) => bail!(ErrorKind::ParserError(format!("{:?}", e))),
+            IResult::Error(e) => bail!(Error::with_chain(e, ErrorKind::ParserError)),
         }
     }
 }
@@ -85,11 +85,11 @@ named!(#[doc = "Parse the xref offset location"], parse_xref_offset<usize>, do_p
 ));
 
 impl Parse for XRefOffset {
-    fn parse(i: &[u8]) -> Result<XRefOffset> {
+    fn parse(i: &[u8]) -> Result<(usize, XRefOffset)> {
         match parse_xref_offset(i) {
-            IResult::Done(_, offset) => Ok(XRefOffset(offset)),
+            IResult::Done(o, offset) => Ok((i.len() - o.len(), XRefOffset(offset))),
             IResult::Incomplete(n) => bail!(ErrorKind::ParserIncomplete(n)),
-            IResult::Error(e) => bail!(ErrorKind::ParserError(format!("{:?}", e))),
+            IResult::Error(e) => bail!(Error::with_chain(e, ErrorKind::ParserError)),
         }
     }
 }

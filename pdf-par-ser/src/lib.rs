@@ -18,7 +18,7 @@ extern crate bigdecimal;
 extern crate itertools;
 
 mod error;
-#[macro_use] mod util;
+#[macro_use] pub mod util;
 pub mod primitive;
 pub mod stream;
 pub mod file;
@@ -31,12 +31,9 @@ use std::io;
 /// Parse an object into a more structured object (defaults to parsing from a byte array)
 ///
 /// TODO think about types, are there more flexible ways of doing this?
-pub trait Parse<Input = [u8]>
-    where Self: Sized,
-          Input: ?Sized
-{
-    /// Attempt to parse the object from the input
-    fn parse(i: &Input) -> Result<Self>;
+pub trait Parse where Self: Sized {
+    /// Attempt to parse the object from the input. Return the remaining input on success
+    fn parse(i: &[u8]) -> Result<(usize, Self)>;
 }
 
 /// Parse an object into a more structured object, consuming the input.
@@ -62,6 +59,15 @@ pub trait Downcast<Input>
 {
     /// Casts the input down to a specific type, failing if it is a different type
     fn downcast(i: Input) -> Result<Self>;
+}
+
+impl<T, U> Downcast<Option<U>> for Option<T> where T: Downcast<U> {
+    fn downcast(i: Option<U>) -> Result<Option<T>> {
+        match i {
+            Some(val) => Ok(Some(T::downcast(val)?)),
+            None => Ok(None)
+        }
+    }
 }
 
 impl<T, Input> ParseFrom<Input> for T

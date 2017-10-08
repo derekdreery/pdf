@@ -32,7 +32,7 @@ impl<'a> PdfReader<'a> {
     /// received.
     pub fn from_bytes(data: &'a [u8]) -> Result<PdfReader> {
 
-        let version = RawPdfVersion::parse(data).ok();
+        let version = RawPdfVersion::parse(data).ok().map(|v| v.1);
         //debug!("Version: {:?}", version);
         let eof_offset = get_eof_offset(&data)?;
         //debug!("'%%EOF' offset: {} - {:?}", eof_offset,
@@ -41,12 +41,12 @@ impl<'a> PdfReader<'a> {
         //debug!("{}:{}: 'xref' offset: {}", file!(), line!(), xref_offset);
         let xref = XRef::from_raw(data, xref_offset)?;
         //debug!("{}:{}: {:#?}", file!(), line!(), trailer);
-        let catalog = object_as_at::<Dictionary>(data, xref.root()?.loc)?;
+        let (_, catalog) = object_as_at::<Dictionary>(data, xref.root()?.loc)?;
         let catalog = Catalog::parse_from(catalog)?;
         //println!();
-        println!("{:#?} {:#?}", xref, catalog.pages);
+        println!("{:#?}\n{:#?}", xref, catalog);
         let pages_entry = xref.entry(catalog.pages.obj)?;
-        let pages: Dictionary = parse_object_as(&data[pages_entry.loc..])?;
+        let (_, pages) = parse_object_as::<Dictionary>(&data[pages_entry.loc..])?;
         let pages = Pages::from_parts(
             PageTree::parse_from(pages)?,
             data,
@@ -138,7 +138,7 @@ impl<'a> PdfReader<'a> {
 */
 
     /// Get an object at a given offset, returns None if object could not be found or parsed
-    fn object_as_at<T>(&self, offset: usize) -> Result<Primitive>
+    fn object_as_at<T>(&self, offset: usize) -> Result<(usize, Primitive)>
         where T: Downcast<Primitive>
     {
         object_as_at(&self.data[..], offset)
@@ -152,7 +152,7 @@ impl<'a> PdfReader<'a> {
     }
 }
 
-fn object_as_at<T>(data: &[u8], offset: usize) -> Result<T>
+fn object_as_at<T>(data: &[u8], offset: usize) -> Result<(usize, T)>
     where T: Downcast<Primitive>
 {
     parse_object_as::<T>(&data[offset..])

@@ -47,7 +47,7 @@ pub fn get_eof_offset(buf: &[u8]) -> Result<usize> {
             break;
         }
         match Eof::parse(&buf[i..]) {
-            Ok(Eof) => { return Ok(i); },
+            Ok((_, Eof)) => { return Ok(i); },
             _ => ()
         };
         i -= 1;
@@ -65,7 +65,7 @@ pub fn get_xref_offset(buf: &[u8], eof_offset: usize) -> Result<usize> {
             break;
         }
         match XRefOffset::parse(&buf[i..]) {
-            Ok(XRefOffset(offset)) => { return Ok(offset); },
+            Ok((_, XRefOffset(offset))) => { return Ok(offset); },
             _ => ()
         };
         i -= 1;

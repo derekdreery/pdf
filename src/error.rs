@@ -12,15 +12,10 @@ error_chain! {
         NoXRef {
             description("could not find the xref location in the last 1024 bytes before EOF")
         }
-        XrefEntryTooBig(requested: u64, last: u64) {
-            description("an xref entry was requested that would be past the end of the table")
-            display("the xref entry with number {} was requested, but the last entry in the table \
-                is {}", requested, last)
-        }
-        XrefEntryTooSmall(requested: u64, first: u64) {
-            description("an xref entry was requested that would be past the start of the table")
-            display("the xref entry with number {} was requested, but the first entry in the table \
-                is {}", requested, first)
+        XrefEntryNotPresent(requested: u64) {
+            description("an xref entry was requested that isn't in the cross-reference table")
+            display("the xref entry with number {} was requested, but it isn't in the \
+                    cross-reference table", requested)
         }
         XrefEntryNotInUse(requested: u64) {
             description("an xref entry was requested that is marked not in use")

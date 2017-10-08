@@ -10,12 +10,12 @@ use std::collections::HashMap;
 use std::fmt;
 
 use bigdecimal::BigDecimal;
-use nom::{self, IResult};
+use nom::{self, IResult, ErrorKind as NomErrorKind};
 use itertools::Itertools;
 
-use stream::StreamParams;
+use stream::{StreamParams, DirectStreamParams};
 use util::{arr3_to_oct, oct_to_arr3, ascii_hex_to_u8, decode_number_sign, eat_pdf_ws,
-    parse_pos_num, is_whitespace, is_normal_char, TryAsRef};
+    parse_pos_num, is_whitespace, is_normal_char, pdf_eol, TryAsRef};
 use {Parse, ParseFrom, Downcast, Error, ErrorKind, Result};
 
 macro_rules! newtype_impl {
@@ -95,6 +95,11 @@ newtype!(#[doc = "A pdf array (one of the basic objects)"]
          #[derive(Debug)], Array { Vec<Primitive> });
 
 impl Array {
+    /// Create an empty array
+    pub fn new() -> Self {
+        Array(Vec::new())
+    }
+
     /// Cast to a vec of a given type, failing if any of the vec are the wrong type
     pub fn downcast_of<T>(self) -> Result<Vec<T>>
         where T: Downcast<Primitive>
@@ -108,17 +113,38 @@ impl Array {
     }
 }
 
-newtype!(#[doc = "A pdf dictionary (one of the basic objects)"]
-         #[derive(Debug)], Dictionary { HashMap<Vec<u8>, Primitive> });
+newtype!(#[doc = "A pdf dictionary (one of the basic objects)"],
+         Dictionary { HashMap<Vec<u8>, Primitive> });
+
+impl Dictionary {
+    pub fn new() -> Self {
+        Dictionary(HashMap::new())
+    }
+}
+
+impl fmt::Debug for Dictionary {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Dictionary(")?;
+        let entries = self.0.iter()
+            .map(|(key, val)| (String::from_utf8_lossy(key), val));
+        f.debug_map().entries(entries).finish()?;
+        write!(f, ")")
+    }
+}
 
 /// A pdf stream primitive (one of the basic objects)
+///
+/// Note that officially a stream length can be a reference, however this is unsupported in this
+/// library, and an error will occur if `Length` is a reference.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Stream {
     /// A stream starts with a dictionary of config information. This object does not resolve the
     /// stream contents, it simply records the start of the data
     ///
     /// Note that `length` is an important required param that gives the length of the stream
-    pub params: StreamParams,
+    pub stream_params: StreamParams,
+    /// Any params that are not part of the standard stream params
+    pub other_params: Dictionary,
     /// The offset of the start of the stream from the index of the primitive
     pub data_offset: usize
 }
@@ -132,6 +158,7 @@ impl From<()> for Null {
         Null
     }
 }
+
 impl Into<()> for Null {
     fn into(self) -> () {
         ()
@@ -152,7 +179,7 @@ pub struct Indirect {
 
 impl Indirect {
     /// Given a type attempt to cast the boxed primitive to that type
-    pub fn unwrap_as<T>(self) -> Result<T>
+    pub fn deref_as<T>(self) -> Result<T>
         where T: ParseFrom<Primitive>
     {
         T::parse_from(*self.inner)
@@ -185,10 +212,10 @@ impl Ref {
               T: ParseFrom<Primitive>
     {
         let data = resolver(self).ok_or(Error::from_kind(ErrorKind::UnresolvedReference(self)))?;
-        let indirect = Indirect::parse(data)?;
+        let (_, indirect) = Indirect::parse(data)?;
         // check we have the right object
         debug_assert!(indirect.reference == self);
-        indirect.unwrap_as::<T>()
+        indirect.deref_as::<T>()
     }
 }
 
@@ -375,6 +402,30 @@ impl Primitive {
         }
         Ok(out)
     }
+
+    pub fn downcast_indirect_as<T>(self) -> Result<T>
+        where T: Downcast<Primitive>
+    {
+        let indirect = Indirect::downcast(self)?;
+        let inner = *(indirect.inner);
+        T::downcast(inner)
+    }
+
+    pub fn type_str(&self) -> &'static str {
+        match self {
+            &Primitive::Comment(_) => "Comment",
+            &Primitive::Boolean(_) => "Boolean",
+            &Primitive::Numeric(_) => "Numeric",
+            &Primitive::String(_) => "String",
+            &Primitive::Name(_) => "Name",
+            &Primitive::Array(_) => "Array",
+            &Primitive::Dictionary(_) => "Dictionary",
+            &Primitive::Stream(_) => "Stream",
+            &Primitive::Null(_) => "Null",
+            &Primitive::Indirect(_) => "Indirect",
+            &Primitive::Ref(_) => "Ref"
+        }
+    }
 }
 
 /// implement `From<$type>` for `$self` where `$self` is an enum with variant `$variant`
@@ -438,10 +489,10 @@ impl fmt::Debug for Primitive {
 macro_rules! impl_Parse {
     ($wrapper:ident, $parser:ident) => {
         impl Parse for $wrapper {
-            fn parse(i: &[u8]) -> Result<$wrapper> {
+            fn parse(i: &[u8]) -> Result<(usize, $wrapper)> {
                 match $parser(i) {
-                    IResult::Done(_, c) => Ok($wrapper(c)),
-                    IResult::Error(e) => bail!(ErrorKind::ParserError(format!("{:?}", e))),
+                    IResult::Done(o, c) => Ok((i.len() - o.len(), $wrapper(c))),
+                    IResult::Error(e) => bail!(Error::with_chain(e, ErrorKind::ParserError)),
                     IResult::Incomplete(n) => bail!(ErrorKind::ParserIncomplete(n))
                 }
             }
@@ -501,10 +552,10 @@ named!(#[doc = "Matches either an integer or a real number"], parse_numeric<Nume
 ));
 
 impl Parse for Numeric {
-    fn parse(i: &[u8]) -> Result<Numeric> {
+    fn parse(i: &[u8]) -> Result<(usize, Numeric)> {
         match parse_numeric(i) {
-            IResult::Done(_, c) => Ok(c), // this is why we can't use macro
-            IResult::Error(e) => bail!(ErrorKind::ParserError(format!("{:?}", e))),
+            IResult::Done(o, c) => Ok((i.len() - o.len(), c)),
+            IResult::Error(e) => bail!(Error::with_chain(e, ErrorKind::ParserError)),
             IResult::Incomplete(n) => bail!(ErrorKind::ParserIncomplete(n))
         }
     }
@@ -627,11 +678,11 @@ named!(#[doc = "Matches a pdf array primitive"], parse_array<Result<Vec<Primitiv
         )), tag!(b"]"))));
 
 impl Parse for Array {
-    fn parse(i: &[u8]) -> Result<Array> {
+    fn parse(i: &[u8]) -> Result<(usize, Array)> {
         match parse_array(i) {
-            IResult::Done(_, Ok(a)) => Ok(Array(a)),
+            IResult::Done(o, Ok(a)) => Ok((i.len() - o.len(), Array(a))),
             IResult::Done(_, Err(e)) => bail!(e),
-            IResult::Error(e) => bail!(ErrorKind::ParserError(format!("{:?}", e))),
+            IResult::Error(e) => bail!(Error::with_chain(e, ErrorKind::ParserError)),
             IResult::Incomplete(n) => bail!(ErrorKind::ParserIncomplete(n))
         }
     }
@@ -662,16 +713,22 @@ named!(#[doc = "Matches a pdf dictionary primitive"],
 );
 
 impl Parse for Dictionary {
-    fn parse(i: &[u8]) -> Result<Dictionary> {
+    fn parse(i: &[u8]) -> Result<(usize, Dictionary)> {
         match parse_dictionary(i) {
-            IResult::Done(_, Ok(d)) => Ok(Dictionary(d)),
+            IResult::Done(o, Ok(d)) => Ok((i.len() - o.len(), Dictionary(d))),
             IResult::Done(_, Err(e)) => bail!(e),
-            IResult::Error(e) => bail!(ErrorKind::ParserError(format!("{:?}", e))),
+            IResult::Error(e) => bail!(Error::with_chain(e, ErrorKind::ParserError)),
             IResult::Incomplete(n) => bail!(ErrorKind::ParserIncomplete(n))
         }
     }
 }
 
+named!(parse_stream_start<()>, do_parse!(
+    eat_pdf_ws >>
+    tag!(b"stream") >>
+    alt!(tag!(b"\n") | tag!(b"\r\n")) >>
+    ()
+));
 
 /// Matches either a dictionary or a stream
 ///
@@ -679,15 +736,11 @@ impl Parse for Dictionary {
 /// return a dictionary if not. We have to return a result of result, to aid error checking further
 /// down
 fn parse_dictionary_or_stream(input: &[u8]) -> IResult<&[u8], Result<Primitive>> {
+    use nom::HexDisplay;
     let (input_, params) = try_parse!(input, parse_dictionary);
     debug!("Detect whether we are in a stream");
     // TODO check end of stream consistency with length
-    let (input_, data_offset) = match do_parse!(input_,
-        eat_pdf_ws >>
-        tag!(b"stream") >>
-        alt!(tag!(b"\n") | tag!(b"\r\n")) >>
-        ())
-    {
+    let (input_, data_offset) = match parse_stream_start(input_) {
         IResult::Done(i, _) => (i, input.len() - i.len()),
         IResult::Incomplete(needed) => { return IResult::Incomplete(needed); },
         IResult::Error(_) => {
@@ -695,26 +748,42 @@ fn parse_dictionary_or_stream(input: &[u8]) -> IResult<&[u8], Result<Primitive>>
         }
     };
 
-    let out = params.map(Dictionary)
-        .and_then(|params| StreamParams::parse_from(params))
-        .map(|sparams|
-            Primitive::Stream(Stream {
-                params: sparams,
-                data_offset,
-            })
-        );
+    let (stream_params, other_params) = match params.map(Dictionary)
+        .and_then(|params| <(StreamParams, Dictionary) as ParseFrom<Dictionary>>::parse_from(params))
+        {
+            Ok(t) => t,
+            Err(e) => { return IResult::Done(input_, Err(e)); }
+        };
 
-    IResult::Done(input_, out)
+    // Get the length (error if indirect)
+    let length = match stream_params.direct_length() {
+        Some(l) => l,
+        None => return IResult::Done(input_,
+            Err(Error::from_kind(ErrorKind::Msg("Indirect stream length is unsupported".into()))))
+    } as usize;
+
+    let (input_, stream_slice) = try_parse!(input_, take!(length));
+    //println!("{}", &input_[0..100].to_hex(8));
+    let (input_, _) = try_parse!(input_, do_parse!(
+        opt!(call!(pdf_eol)) >>
+        tag!(b"endstream") >>
+        ()
+    ));
+    //println!("{}", &input_[length..length+100].to_hex(8));
+
+    IResult::Done(input_, Ok(Primitive::Stream(Stream {
+        stream_params, other_params, data_offset,
+    })))
 }
 
 impl Parse for Stream {
-    fn parse(i: &[u8]) -> Result<Stream> {
+    fn parse(i: &[u8]) -> Result<(usize, Stream)> {
         match parse_dictionary_or_stream(i) {
-            IResult::Done(_, Ok(Primitive::Stream(s))) => Ok(s),
+            IResult::Done(o, Ok(Primitive::Stream(s))) => Ok((i.len() - o.len(), s)),
             IResult::Done(_, Ok(_))
                 => bail!(ErrorKind::UnexpectedToken("Dictionary".into(), "Stream")),
             IResult::Done(_, Err(e)) => bail!(e),
-            IResult::Error(e) => bail!(ErrorKind::ParserError(format!("{:?}", e))),
+            IResult::Error(e) => bail!(Error::with_chain(e, ErrorKind::ParserError)),
             IResult::Incomplete(n) => bail!(ErrorKind::ParserIncomplete(n))
         }
     }
@@ -724,10 +793,10 @@ impl Parse for Stream {
 named!(#[doc = "Matches the null primitive"], parse_null<()>, map!(pdf_ws!(tag!(b"null")), |_| ()));
 
 impl Parse for Null {
-    fn parse(i: &[u8]) -> Result<Null> {
+    fn parse(i: &[u8]) -> Result<(usize, Null)> {
         match parse_null(i) {
-            IResult::Done(_, _) => Ok(Null), // this is why we can't use macro
-            IResult::Error(e) => bail!(ErrorKind::ParserError(format!("{:?}", e))),
+            IResult::Done(o, _) => Ok((i.len() - o.len(), Null)),
+            IResult::Error(e) => bail!(Error::with_chain(e, ErrorKind::ParserError)),
             IResult::Incomplete(n) => bail!(ErrorKind::ParserIncomplete(n))
         }
     }
@@ -741,10 +810,10 @@ named!(#[doc = "Matches a ref primitive"], parse_ref<Ref>, pdf_ws!(do_parse!(
 )));
 
 impl Parse for Ref {
-    fn parse(i: &[u8]) -> Result<Ref> {
+    fn parse(i: &[u8]) -> Result<(usize, Ref)> {
         match parse_ref(i) {
-            IResult::Done(_, r) => Ok(r),
-            IResult::Error(e) => bail!(ErrorKind::ParserError(format!("{:?}", e))),
+            IResult::Done(o, r) => Ok((i.len() - o.len(), r)),
+            IResult::Error(e) => bail!(Error::with_chain(e, ErrorKind::ParserError)),
             IResult::Incomplete(n) => bail!(ErrorKind::ParserIncomplete(n))
         }
     }
@@ -761,14 +830,14 @@ named!(parse_indirect<(Ref, Result<Primitive>)>, pdf_ws!(do_parse!(
 )));
 
 impl Parse for Indirect {
-    fn parse(i: &[u8]) -> Result<Indirect> {
+    fn parse(i: &[u8]) -> Result<(usize, Indirect)> {
         match parse_indirect(i) {
-            IResult::Done(_, (reference, Ok(inner))) => Ok(Indirect {
+            IResult::Done(o, (reference, Ok(inner))) => Ok((i.len() - o.len(), Indirect {
                 reference,
                 inner: Box::new(inner)
-            }),
+            })),
             IResult::Done(_, (_, Err(e))) => Err(e),
-            IResult::Error(e) => bail!(ErrorKind::ParserError(format!("{:?}", e))),
+            IResult::Error(e) => bail!(Error::with_chain(e, ErrorKind::ParserError)),
             IResult::Incomplete(n) => bail!(ErrorKind::ParserIncomplete(n))
         }
     }
@@ -778,7 +847,7 @@ impl Parse for Indirect {
 ///
 /// The order does not match the defined order as it is significant - more specific parsers must
 /// come before less specific parsers, since the grammar is ambiguous.
-named!(parse_primitive<Result<Primitive>>, alt!(
+named!(parse_primitive<Result<Primitive>>, pdf_ws!(alt!(
     // needs to be above integer
     map!(call!(parse_indirect), |(reference, inner)|
          inner.map(|inner| Primitive::Indirect(Indirect { reference, inner: Box::new(inner) } ))) |
@@ -791,14 +860,14 @@ named!(parse_primitive<Result<Primitive>>, alt!(
     parse_dictionary_or_stream |
     map!(call!(parse_comment), |t| Ok(Primitive::Comment(Comment(t)))) |
     map!(call!(parse_numeric), |t| Ok(Primitive::Numeric(t)))
-));
+)));
 
 impl Parse for Primitive {
-    fn parse(i: &[u8]) -> Result<Primitive> {
+    fn parse(i: &[u8]) -> Result<(usize, Primitive)> {
         match parse_primitive(i) {
-            IResult::Done(_, Ok(p)) => Ok(p),
+            IResult::Done(o, Ok(p)) => Ok((i.len() - o.len(), p)),
             IResult::Done(_, Err(e)) => Err(e),
-            IResult::Error(e) => bail!(ErrorKind::ParserError(format!("{:?}", e))),
+            IResult::Error(e) => bail!(Error::with_chain(e, ErrorKind::ParserError)),
             IResult::Incomplete(n) => bail!(ErrorKind::ParserIncomplete(n))
         }
     }
@@ -857,10 +926,10 @@ impl<T> MaybeRef<T> where T: ParseFrom<Primitive> {
             MaybeRef::Direct(t) => { return Ok(t); }
         };
         let data = resolver(r).ok_or(Error::from_kind(ErrorKind::UnresolvedReference(r)))?;
-        let indirect = Indirect::parse(data)?;
+        let (_, indirect) = Indirect::parse(data)?;
         // check we have the right object
         debug_assert!(indirect.reference == r);
-        indirect.unwrap_as::<T>()
+        indirect.deref_as::<T>()
     }
 }
 
@@ -969,12 +1038,34 @@ mod tests {
     use super::*;
     use Needed;
 
+    macro_rules! parse_test_helper {
+        ($impl:ty, $raw:expr, Error $err:expr) => {{
+            assert_eq!(
+                $impl::parse(&$raw[..]),
+                $err
+            ),
+        }};
+
+        ($impl:ty, $raw:expr, ErrorKind $kind:expr) => {{
+            assert_eq!(
+                $impl::parse(&$raw[..]),
+                Error::from_kind($kind)
+            ),
+        }};
+
+        ($impl:ty, $raw:expr, $out:expr) => {{
+            assert_eq!(
+                $impl::parse(&$raw[..]),
+                Ok($out)
+            ),
+        }};
+    }
+
     #[test]
     fn comment() {
         test_helper!(parse_comment => [
             (b"%this is a comment\n",
-                IResult::Done(&b""[..], b"this is a comment".to_vec()),
-                "%this is a comment\\n")
+                IResult::Done(&b""[..], b"this is a comment".to_vec()))
         ]);
     }
 
@@ -983,7 +1074,7 @@ mod tests {
         test_helper!(parse_boolean => [
             (b"true", IResult::Done(&b""[..], true)),
             (b"false", IResult::Done(&b""[..], false)),
-            (b"other", test_error!()),
+            (b"other", IResult::Error(error_position!(NomErrorKind::Alt, &b"other"[..]))),
             (b"tr", IResult::Incomplete(Needed::Size(4))),
             (b"f", IResult::Incomplete(Needed::Size(5)))
         ]);
@@ -992,21 +1083,21 @@ mod tests {
     #[test]
     fn integer() {
         test_helper!(parse_integer => [
-            (b" 12.3", test_error!()),
+            (b" 12.3", IResult::Error(error_position!(NomErrorKind::Digit, &b" 12.3"[..]))),
             // this behaviour means real must be tested for first
             (b"12.3", IResult::Done(&b".3"[..], 12)),
             (b"+28", IResult::Done(&b""[..], 28)),
             (b"-4123", IResult::Done(&b""[..], -4123)),
-            (b"--4123", test_error!())
+            (b"--4123", IResult::Error(error_position!(NomErrorKind::Digit, &b"-4123"[..])))
         ]);
     }
 
     #[test]
     fn real() {
         test_helper!(parse_real => [
-            // Note the difficulty with ending a stream on a real (or integer), you cannot be sure you
-            // are at the end of the number
-            (b"12 ", test_error!()),
+            // Note the difficulty with ending a stream on a real (or integer),
+            // you cannot be sure you are at the end of the number
+            (b"12 ", IResult::Error(error_position!(NomErrorKind::Tag, &b" "[..]))),
             (b"12. ", IResult::Done(&b" "[..], BigDecimal::parse_bytes(b"12.", 10).unwrap()))
         ]);
     }
@@ -1014,60 +1105,64 @@ mod tests {
     #[test]
     fn string() {
         test_helper!(parse_string => [
-            (b"(simple)", IResult::Done(&b""[..], b"simple".to_vec()), "simple"),
-            (b"((double))", IResult::Done(&b""[..], b"(double)".to_vec()), "(double)"),
+            (b"(simple)", IResult::Done(&b""[..], b"simple".to_vec())),
+            (b"((double))", IResult::Done(&b""[..], b"(double)".to_vec())),
             // Notice that we cannot detect an incomplete string, because any char is valid inside a
             // string
-            (b"((double_broken)", IResult::Incomplete(Needed::Size(17)), ""),
-            (b"((double_broken) ", IResult::Incomplete(Needed::Size(18)), ""),
-            (b"(\\(double_broken)",
-                IResult::Done(&b""[..], b"(double_broken".to_vec()),
-                "(double_broken"),
-            (b"(escape\\n\\t\\217\\432)",
-                IResult::Done(&b""[..], b"escape\n\t\x8f\x1a".to_vec()),
-                "escape\\n\\t\\217\\432"),
+            (b"((double_broken)", IResult::Incomplete(Needed::Size(17))),
+            (b"((double_broken) ", IResult::Incomplete(Needed::Size(18))),
+            (b"(\\(double_broken)", IResult::Done(&b""[..], b"(double_broken".to_vec())),
+            (b"(escape\\n\\t\\217\\432)", IResult::Done(&b""[..], b"escape\n\t\x8f\x1a".to_vec())),
             (b"(Line with a \n newline)",
-                IResult::Done(&b""[..], b"Line with a \n newline".to_vec()),
-                "Line with a \\n newline"),
+                IResult::Done(&b""[..], b"Line with a \n newline".to_vec())),
             (b"(escaped \\\nnewline)",
-                IResult::Done(&b""[..], b"escaped newline".to_vec()),
-                "escaped newline"),
-            (b"(\\0023)", IResult::Done(&b""[..], b"\x023".to_vec()), "\\0023"),
-            (b"<0000>", IResult::Done(&b""[..], b"\0\0".to_vec()), "\\0\\0"),
-            (b"<A23F>", IResult::Done(&b""[..], b"\xa2\x3f".to_vec()), "\\xa2\\x3f"),
-            (b" < A23F3 > ", IResult::Done(&b""[..], b"\xa2\x3f\x30".to_vec()), "\\xa2\\x3f\\x30")
+                IResult::Done(&b""[..], b"escaped newline".to_vec())),
+            (b"(\\0023)", IResult::Done(&b""[..], b"\x023".to_vec())),
+            (b"<0000>", IResult::Done(&b""[..], b"\0\0".to_vec())),
+            (b"<A23F>", IResult::Done(&b""[..], b"\xa2\x3f".to_vec())),
+            (b" < A23F3 > ", IResult::Done(&b""[..], b"\xa2\x3f\x30".to_vec()))
         ]);
     }
 
     #[test]
     fn name() {
         test_helper!(parse_name => [
-            (b"/name", IResult::Done(&b""[..], b"name".to_vec()), "name"),
-            (b"/", IResult::Done(&b""[..], b"".to_vec()), ""),
-            (b"/#6E#61#6D#65", IResult::Done(&b""[..], b"name".to_vec()), "#6E#61#6D#65"),
-            (b"/#6E#61#D#65", IResult::Done(&b""[..], b"na#De".to_vec()), "#6E#61#D#65")
+            (b"/name", IResult::Done(&b""[..], b"name".to_vec())),
+            (b"/", IResult::Done(&b""[..], b"".to_vec())),
+            (b"/#6E#61#6D#65", IResult::Done(&b""[..], b"name".to_vec())),
+            (b"/#6E#61#D#65", IResult::Done(&b""[..], b"na#De".to_vec()))
 
         ]);
     }
 
-    #[test]
+    #[test] // rewrite to take account of result
     fn array() {
         test_helper!(parse_array => [
+            (b"[]",
+             IResult::Done(&b""[..], Ok(vec![]))),
+            (b"[ ]",
+             IResult::Done(&b""[..], Ok(vec![]))),
+            (b"[ 12 ]",
+             IResult::Done(&b""[..], Ok(vec![Primitive::Numeric(Numeric::Integer(12))]))),
             (b"[/name 12 true]",
-             IResult::Done(&b""[..], vec![
+             IResult::Done(&b""[..], Ok(vec![
                 Primitive::Name(Name(b"name".to_vec().into())),
                 Primitive::Numeric(Numeric::Integer(12)),
                 Primitive::Boolean(Boolean(true))
-             ]),
-             "[/name 12 true]"),
-            (b"[/name (str]ing) 12 true]",
-             IResult::Done(&b""[..], vec![
+             ]))),
+            (b"[ /name 12 true ]",
+             IResult::Done(&b""[..], Ok(vec![
+                Primitive::Name(Name(b"name".to_vec().into())),
+                Primitive::Numeric(Numeric::Integer(12)),
+                Primitive::Boolean(Boolean(true))
+             ]))),
+            (b"[ /name (str]ing) 12 true ]",
+             IResult::Done(&b""[..], Ok(vec![
                 Primitive::Name(Name(b"name".to_vec().into())),
                 Primitive::String(b"str]ing".to_vec().into()),
                 Primitive::Numeric(Numeric::Integer(12)),
                 Primitive::Boolean(Boolean(true))
-             ]),
-             "[ /name (str]ing) 12 true ]")
+             ])))
         ]);
     }
 
@@ -1091,11 +1186,9 @@ mod tests {
 
         test_helper!(parse_dictionary => [
             (b"<< /simple /dictionary /of /keys_values >>",
-                IResult::Done(&b""[..], control.clone()),
-                "<< /simple /dictionary /of /keys_values >>"),
+                IResult::Done(&b""[..], Ok(control.clone()))),
             (b"<</simple/dictionary/of/keys_values>>",
-                IResult::Done(&b""[..], control),
-                "<< /simple /dictionary /of /keys_values >>")
+                IResult::Done(&b""[..], Ok(control)))
         ]);
         let sink = br#"
 << /Size 22
@@ -1105,7 +1198,7 @@ mod tests {
 < 81b14aafa313db63dbd6f981e49f94f4 >
 ]
 >>"#;
-        assert_eq!(super::parse_dictionary(sink), IResult::Done(&b""[..], control2));
+        assert_eq!(super::parse_dictionary(sink), IResult::Done(&b""[..], Ok(control2)));
     }
 
     #[test]
@@ -1115,25 +1208,29 @@ mod tests {
         let mut test_map2 = HashMap::new();
         test_map2.insert(b"test".to_vec(), Primitive::Numeric(Numeric::Integer(4)));
 
+        let test_input_1 = "<</test 4>> true";
+        let test_input_2 = "<</Length 4>> \nstream\ntest\nendstream\n";
+
         test_helper!(parse_dictionary_or_stream => [
             (b"<</test 4>> true",
-                IResult::Done(&b"true"[..], Primitive::Dictionary(Dictionary(test_map2))),
-                "<</test 4>> true"),
+                IResult::Done(&b"true"[..], Ok(Primitive::Dictionary(Dictionary(test_map2))))),
 
-            (b"<</length 4>> \nstream\ntest\nendstream\n",
-                IResult::Done(&b"test\nendstream\n"[..], Primitive::Stream(Stream {
-                    params: Dictionary(test_map),
+            (b"<</Length 4>> \nstream\ntest\nendstream\n",
+                IResult::Done(&b"\n"[..], Ok(Primitive::Stream(Stream {
+                    stream_params: StreamParams::Direct(DirectStreamParams {
+                        length: 4,
+                        ..Default::default()
+                    }),
+                    other_params: Dictionary::new(),
                     data_offset: 22,
-                })),
-                "<</length 4>> \nstream\ntest\nendstream\n"
-            )
+                }))))
         ]);
     }
 
     #[test]
     fn null() {
         test_helper!(parse_null => [
-            (b" null ", IResult::Done(&b""[..], ()), "null")
+            (b" null ", IResult::Done(&b""[..], ()))
         ]);
     }
 
@@ -1141,9 +1238,22 @@ mod tests {
     fn primitive_ref() {
         test_helper!(parse_ref => [
             (b"200 0 R",
-             IResult::Done(&b""[..], Ref { obj: 200, gen: 0 }),
-             "200 0 R")
+             IResult::Done(&b""[..], Ref { obj: 200, gen: 0 }))
         ]);
     }
 
+    #[test]
+    fn indirect_stream() {
+        let input = b"22 0 obj<</Length 4>>stream\ntest\nendstream\nendobj";
+        let parsed = Primitive::parse(&input[..]);
+        assert!(parsed.is_ok());
+    }
+
+    #[test]
+    fn kitchen_sink() {
+        let input = br#"333277 0 obj<</MarkInfo<</Marked true>>/PageMode/UseOutlines/Names 333279 0 R/ViewerPreferences<</DisplayDocTitle true>>/Outlines 333294 0 R/Metadata 109958 0 R/AcroForm 333278 0 R/Pages 109805 0 R/StructTreeRoot 109960 0 R/Type/Catalog>>
+endobj"#;
+        let result = parse_primitive(&input[..]);
+        assert!(result.is_done());
+    }
 }

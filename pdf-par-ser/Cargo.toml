@@ -4,8 +4,12 @@ description = "Parsers and serializers for pdf format"
 version = "0.1.0"
 authors = ["Richard Dodd <richard.o.dodd@gmail.com>"]
 
+[dependencies.nom]
+git = "https://github.com/derekdreery/nom"
+branch = "pub_crate"
+#features = [ "verbose-errors" ]
+
 [dependencies]
-nom = { git = "https://github.com/derekdreery/nom", branch = "pub_crate" }
 bigdecimal = "*"
 num = "*"
 itertools = "*"
